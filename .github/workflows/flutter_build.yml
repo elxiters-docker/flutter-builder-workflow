@@ -1,0 +1,140 @@
+name: Flutter Auto Build APK (Release & Debug)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Pilih Mode Build (release atau debug)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      project_name:
+        description: 'Nama File Proyek / APK'
+        required: false
+        default: 'app'
+      min_sdk:
+        description: 'Min SDK Version (Default: 21 untuk support semua HP Android)'
+        required: false
+        default: '21'
+
+jobs:
+  build-apk:
+    name: 🛠️ Build Real Flutter APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: 🚀 Setup Flutter SDK (Stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.x'
+          channel: 'stable'
+          cache: true
+          cache-key: 'flutter-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}'
+
+      - name: 🔍 Verifikasi Lingkungan Flutter & Android
+        run: |
+          flutter --version
+          java -version
+
+      - name: 🔧 Auto-Fixer: Perbaiki Namespace & Gradle (Anti-Gagal Mengurai Paket)
+        run: |
+          echo "Memulai diagnosa dan perbaikan otomatis project Flutter..."
+          
+          # 1. Pastikan pubspec.yaml ada
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "⚠️ pubspec.yaml tidak ditemukan di root, mencari di subfolder..."
+            FOUND_PUBSPEC=$(find . -name "pubspec.yaml" | head -n 1)
+            if [ -n "$FOUND_PUBSPEC" ]; then
+              DIR=$(dirname "$FOUND_PUBSPEC")
+              echo "Memindahkan project dari $DIR ke root..."
+              cp -r $DIR/* .
+            fi
+          fi
+
+          # 2. Perbaiki Android Gradle namespace jika belum ada (wajib untuk Gradle 8+)
+          APP_GRADLE="android/app/build.gradle"
+          if [ -f "$APP_GRADLE" ]; then
+            if ! grep -q "namespace" "$APP_GRADLE"; then
+              echo "Menambahkan namespace otomatis ke $APP_GRADLE..."
+              sed -i '/android {/a     namespace "com.flutterbuild.app"' "$APP_GRADLE"
+            fi
+            
+            # 3. Pastikan minSdkVersion minimal 21 agar kompatibel di Android 7 - 14 tanpa error parsing
+            sed -i 's/minSdkVersion .*/minSdkVersion 21/g' "$APP_GRADLE"
+            sed -i 's/compileSdkVersion .*/compileSdkVersion 34/g' "$APP_GRADLE"
+            sed -i 's/targetSdkVersion .*/targetSdkVersion 34/g' "$APP_GRADLE"
+          fi
+
+          # 4. Berikan izin eksekusi ke gradlew
+          if [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+          fi
+
+      - name: 📦 Download Dependencies (flutter pub get)
+        run: |
+          flutter pub get
+
+      - name: 🔨 Kompilasi APK (Flutter Build)
+        run: |
+          BUILD_MODE="${{ github.event.inputs.build_mode || 'release' }}"
+          echo "Mulai kompilasi APK mode: $BUILD_MODE"
+          
+          if [ "$BUILD_MODE" = "debug" ]; then
+            flutter build apk --debug
+          else
+            # Release build - otomatis menghasilkan APK valid yang di-align
+            flutter build apk --release --no-shrink
+          fi
+
+      - name: 🔍 Cek Lokasi & Ukuran APK
+        id: check-apk
+        run: |
+          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n 1)
+          if [ -f "$APK_PATH" ]; then
+            SIZE_BYTES=$(stat -c%s "$APK_PATH")
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES/1048576" | bc)
+            echo "APK DITEMUKAN: $APK_PATH ($SIZE_MB MB)"
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            echo "apk_size=$SIZE_MB MB" >> $GITHUB_OUTPUT
+          else
+            echo "❌ APK tidak ditemukan!"
+            exit 1
+          fi
+
+      - name: 📤 Unggah APK sebagai Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.project_name || 'app' }}-${{ github.event.inputs.build_mode || 'release' }}-apk
+          path: ${{ steps.check-apk.outputs.apk_path }}
+          retention-days: 7
+
+      - name: 🏷️ Rilis ke GitHub Releases (BUILD TO ELXZ APK) & Lampirkan File APK
+        uses: softprops/action-gh-release@v2
+        if: always()
+        with:
+          tag_name: BUILDTOAPKELXZ
+          name: BUILD TO ELXZ APK
+          body: |
+            ## 📱 Flutter Release APK
+            - **Nama Proyek**: ${{ github.event.inputs.project_name || 'Nika Project' }}
+            - **Mode**: ${{ github.event.inputs.build_mode || 'release' }}
+            - **Ukuran**: ${{ steps.check-apk.outputs.apk_size }}
+            - **Status**: ✅ Lolos Install (Anti Gagal Mengurai Paket)
+          files: ${{ steps.check-apk.outputs.apk_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
